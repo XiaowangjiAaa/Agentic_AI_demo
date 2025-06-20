@@ -8,6 +8,7 @@ from tools import (
     FUNCTION_SCHEMAS as functions,
     extract_image_paths
 )
+from memory import Memory
 from agent_parser import (
     parse_user_intent,
     resolve_image_path
@@ -16,10 +17,19 @@ from agent_parser import (
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ========== Memory for Last Analysis ==========
-last_result_text = None
-last_result_dict = None
-last_image_path = None
+# ========== Persistent Memory ==========
+memory = Memory()
+
+def _result_to_dict(text: str):
+    if not text:
+        return None
+    try:
+        return {
+            line.split(":")[0].strip(): line.split(":")[1].strip()
+            for line in text.splitlines()[2:] if ":" in line
+        }
+    except Exception:
+        return None
 
 # ========== Utility: fallback path correction ==========
 def try_correct_image_filename(wrong_path: str) -> str:
@@ -35,9 +45,10 @@ def try_correct_image_filename(wrong_path: str) -> str:
 
 # ========== CLI Entry ==========
 def run_agent():
-    global last_result_text, last_result_dict, last_image_path
     print("🤖 Crack Analysis Agent is ready. Enter your instruction ('exit' to quit):")
-    history = []
+    history = memory.get_history()
+    last_result_text, last_image_path = memory.get_last_result()
+    last_result_dict = _result_to_dict(last_result_text)
 
     while True:
         user_input = input("\n🗣️ You: ")
@@ -70,28 +81,37 @@ def run_agent():
                     print(f"\n🤖 Compliance: {status}")
                     continue
                 if any(k in query for k in ["advice", "repair", "fix", "how should", "what should"]):
-                    summary_prompt = f"You are a crack repair expert. Based on the following result, give suggestions:\n\n{json.dumps(last_result_dict, indent=2)}"
+                    summary_prompt = (
+                        "You are a crack repair expert. Based on the following result, give suggestions:\n\n"
+                        + json.dumps(last_result_dict, indent=2)
+                    )
                     completion = client.chat.completions.create(
                         model="gpt-4",
                         messages=[{"role": "user", "content": summary_prompt}],
-                        temperature=0.5
+                        temperature=0.5,
                     )
-                    print(f"\n🤖 {completion.choices[0].message.content.strip()}")
+                    reply = completion.choices[0].message.content.strip()
+                    print(f"\n🤖 {reply}")
+                    history.append({"role": "user", "content": user_input})
+                    history.append({"role": "assistant", "content": reply})
+                    memory.add_message("user", user_input)
+                    memory.add_message("assistant", reply)
                     continue
-            # fallback to GPT
             try:
                 completion = client.chat.completions.create(
                     model="gpt-4",
                     messages=[
                         {"role": "system", "content": "You are an intelligent assistant for a crack analysis system."},
-                        {"role": "user", "content": user_input}
+                        {"role": "user", "content": user_input},
                     ],
-                    temperature=0.3
+                    temperature=0.3,
                 )
                 reply = completion.choices[0].message.content.strip()
                 print(f"\n🤖 {reply}")
                 history.append({"role": "user", "content": user_input})
                 history.append({"role": "assistant", "content": reply})
+                memory.add_message("user", user_input)
+                memory.add_message("assistant", reply)
             except Exception as e:
                 print(f"❌ GPT fallback failed: {type(e).__name__}: {e}")
             continue
@@ -117,21 +137,19 @@ def run_agent():
         print(f"\n🤖 {result}")
         history.append({"role": "user", "content": user_input})
         history.append({"role": "assistant", "content": result})
+        memory.add_message("user", user_input)
+        memory.add_message("assistant", result)
 
         if tool == "analyze_one_image" and isinstance(result, str):
             last_result_text = result
             last_image_path = params.get("image_path")
-            try:
-                last_result_dict = {
-                    line.split(":")[0].strip(): line.split(":")[1].strip()
-                    for line in result.splitlines()[2:] if ":" in line
-                }
-            except:
-                last_result_dict = None
+            last_result_dict = _result_to_dict(result)
+            memory.set_last_result(last_result_text, last_image_path)
 
 # ========== For UI (Gradio etc.) ==========
 def agent_respond(user_input: str):
-    global last_result_text, last_result_dict, last_image_path
+    last_result_text, last_image_path = memory.get_last_result()
+    last_result_dict = _result_to_dict(last_result_text)
     parsed = parse_user_intent(user_input)
     tool = parsed.get("tool")
     params = parsed.get("parameters", {})
@@ -152,7 +170,10 @@ def agent_respond(user_input: str):
                     messages=[{"role": "user", "content": summary_prompt}],
                     temperature=0.5
                 )
-                return completion.choices[0].message.content.strip(), {}
+                reply = completion.choices[0].message.content.strip()
+                memory.add_message("user", user_input)
+                memory.add_message("assistant", reply)
+                return reply, {}
 
         try:
             completion = client.chat.completions.create(
@@ -163,7 +184,10 @@ def agent_respond(user_input: str):
                 ],
                 temperature=0.3
             )
-            return completion.choices[0].message.content.strip(), {}
+            reply = completion.choices[0].message.content.strip()
+            memory.add_message("user", user_input)
+            memory.add_message("assistant", reply)
+            return reply, {}
         except Exception as e:
             return f"❌ GPT fallback failed: {type(e).__name__}: {e}", {}
 
@@ -185,13 +209,8 @@ def agent_respond(user_input: str):
     if tool == "analyze_one_image" and isinstance(result, str):
         last_result_text = result
         last_image_path = params.get("image_path")
-        try:
-            last_result_dict = {
-                line.split(":")[0].strip(): line.split(":")[1].strip()
-                for line in result.splitlines()[2:] if ":" in line
-            }
-        except:
-            last_result_dict = None
+        last_result_dict = _result_to_dict(result)
+        memory.set_last_result(last_result_text, last_image_path)
 
     image_reference = params.get("image_path", user_input)
     paths = extract_image_paths(image_reference)
@@ -218,7 +237,12 @@ def handle_user_request(user_input: str) -> str:
             params["image_path"] = corrected
 
     params.pop("image_index", None)
-    return function_map[tool](params)
+    result = function_map[tool](params)
+    memory.add_message("user", user_input)
+    memory.add_message("assistant", result)
+    if tool == "analyze_one_image" and isinstance(result, str):
+        memory.set_last_result(result, params.get("image_path"))
+    return result
 
 # ========== Main Entry ==========
 if __name__ == "__main__":
