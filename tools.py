@@ -2,6 +2,7 @@ import os
 import re
 import cv2
 import pandas as pd
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from agent_main import main as process_all_images, process_image
@@ -103,6 +104,32 @@ summarize_results_spec = {
     }
 }
 
+# ========= Tool 4: fetch_web_content =========
+def fetch_web_content(url: str) -> str:
+    """Fetch plain text content from a web page."""
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except Exception as e:
+        return f"❌ Failed to fetch {url}: {e}"
+
+    text = response.text
+    if len(text) > 3000:
+        text = text[:3000]
+    return text
+
+fetch_web_content_spec = {
+    "name": "fetch_web_content",
+    "description": "Fetch raw text content from a web page for reference or summarization.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Target URL"}
+        },
+        "required": ["url"]
+    }
+}
+
 # ========= Path Extraction (UI support) =========
 def extract_image_paths(text: str) -> dict:
     match = re.search(r"(input_images[\\/][\w\-.]+)", text)
@@ -120,10 +147,12 @@ FUNCTION_SCHEMAS = [
     analyze_all_images_spec,
     analyze_one_image_spec,
     summarize_results_spec,
+    fetch_web_content_spec,
 ]
 
 FUNCTION_MAP = {
     "analyze_all_images": lambda args: analyze_all_images(**args),
     "analyze_one_image": lambda args: analyze_one_image(**args),
     "summarize_results": lambda args: summarize_results(),
+    "fetch_web_content": lambda args: fetch_web_content(**args),
 }
