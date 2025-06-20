@@ -8,6 +8,7 @@ from tools import (
     FUNCTION_SCHEMAS as functions,
     extract_image_paths
 )
+from process_image import process_image
 from memory import Memory
 from agent_parser import (
     parse_user_intent,
@@ -24,10 +25,15 @@ def _result_to_dict(text: str):
     if not text:
         return None
     try:
-        return {
-            line.split(":")[0].strip(): line.split(":")[1].strip()
-            for line in text.splitlines()[2:] if ":" in line
-        }
+        return json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            return {
+                line.split(":")[0].strip(): line.split(":")[1].strip()
+                for line in text.splitlines()[2:] if ":" in line
+            }
+        except Exception:
+            return None
     except Exception:
         return None
 
@@ -42,6 +48,26 @@ def try_correct_image_filename(wrong_path: str) -> str:
         if base_name in f.lower():
             return os.path.join(folder, f)
     return None
+
+# ========== Measurement Helper ==========
+def measure_image(image_path: str, pixel_size: float = 1.0) -> dict:
+    try:
+        result = process_image(image_path, pixel_size_mm=pixel_size)
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    if pixel_size == 1.0:
+        converted = {}
+        for k, v in result.items():
+            if "(mm)" in k:
+                converted[k.replace("(mm)", "(px)")] = v
+            elif "(mm^2)" in k:
+                converted[k.replace("(mm^2)", "(px^2)")] = v
+            else:
+                converted[k] = v
+        converted["Pixel Size (px)"] = 1
+        return converted
+    return result
 
 # ========== CLI Entry ==========
 def run_agent():
@@ -62,41 +88,66 @@ def run_agent():
 
         if not tool or tool not in function_map:
             query = user_input.lower()
-            if last_result_dict:
+
+            if "pixel_size" in params:
+                pixel_size = params["pixel_size"]
+                if last_image_path:
+                    last_result_dict = measure_image(last_image_path, pixel_size)
+                    last_result_text = json.dumps(last_result_dict, ensure_ascii=False, indent=2)
+                    memory.set_last_result(last_result_text, last_image_path)
+                    print(f"\n🤖 Measurements updated with pixel size {pixel_size} mm/pixel.")
+                else:
+                    print("❌ No image segmented yet.")
+                continue
+
+            if any(k in query for k in ["max width", "avg width", "average width", "area", "length", "compliant"]):
+                if not last_image_path:
+                    print("❌ No image segmented yet.")
+                    continue
+                if last_result_dict is None:
+                    last_result_dict = measure_image(last_image_path, 1.0)
+                    last_result_text = json.dumps(last_result_dict, ensure_ascii=False, indent=2)
+                    memory.set_last_result(last_result_text, last_image_path)
                 if "max width" in query:
-                    print(f"\n🤖 Max Width: {last_result_dict.get('Max Width (mm)', 'N/A')} mm")
-                    continue
-                if "avg width" in query or "average width" in query:
-                    print(f"\n🤖 Avg Width: {last_result_dict.get('Avg Width (mm)', 'N/A')} mm")
-                    continue
-                if "area" in query:
-                    print(f"\n🤖 Area: {last_result_dict.get('Area (mm^2)', 'N/A')} mm²")
-                    continue
-                if "length" in query:
-                    print(f"\n🤖 Length: {last_result_dict.get('Length (mm)', 'N/A')} mm")
-                    continue
-                if "compliant" in query:
+                    print(f"\n🤖 Max Width: {last_result_dict.get('Max Width (px)', 'N/A')} px")
+                elif "avg width" in query or "average width" in query:
+                    print(f"\n🤖 Avg Width: {last_result_dict.get('Avg Width (px)', 'N/A')} px")
+                elif "area" in query:
+                    print(f"\n🤖 Area: {last_result_dict.get('Area (px^2)', 'N/A')} px^2")
+                elif "length" in query:
+                    print(f"\n🤖 Length: {last_result_dict.get('Length (px)', 'N/A')} px")
+                elif "compliant" in query:
                     flags = [k for k in last_result_dict if k.endswith("OK")]
                     status = {k: last_result_dict[k] for k in flags}
                     print(f"\n🤖 Compliance: {status}")
-                    continue
-                if any(k in query for k in ["advice", "repair", "fix", "how should", "what should"]):
-                    summary_prompt = (
-                        "You are a crack repair expert. Based on the following result, give suggestions:\n\n"
-                        + json.dumps(last_result_dict, indent=2)
-                    )
-                    completion = client.chat.completions.create(
-                        model="gpt-4",
-                        messages=[{"role": "user", "content": summary_prompt}],
-                        temperature=0.5,
-                    )
-                    reply = completion.choices[0].message.content.strip()
-                    print(f"\n🤖 {reply}")
-                    history.append({"role": "user", "content": user_input})
-                    history.append({"role": "assistant", "content": reply})
-                    memory.add_message("user", user_input)
-                    memory.add_message("assistant", reply)
-                    continue
+                continue
+
+            if any(k in query for k in ["advice", "repair", "fix", "how should", "what should"]):
+                if last_result_dict is None:
+                    if last_image_path:
+                        last_result_dict = measure_image(last_image_path, 1.0)
+                        last_result_text = json.dumps(last_result_dict, ensure_ascii=False, indent=2)
+                        memory.set_last_result(last_result_text, last_image_path)
+                    else:
+                        print("❌ No image data available.")
+                        continue
+                summary_prompt = (
+                    "You are a crack repair expert. Based on the following result, give suggestions:\n\n"
+                    + json.dumps(last_result_dict, indent=2)
+                )
+                completion = client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    temperature=0.5,
+                )
+                reply = completion.choices[0].message.content.strip()
+                print(f"\n🤖 {reply}")
+                history.append({"role": "user", "content": user_input})
+                history.append({"role": "assistant", "content": reply})
+                memory.add_message("user", user_input)
+                memory.add_message("assistant", reply)
+                continue
+
             try:
                 completion = client.chat.completions.create(
                     model="gpt-4",
@@ -145,6 +196,11 @@ def run_agent():
             last_image_path = params.get("image_path")
             last_result_dict = _result_to_dict(result)
             memory.set_last_result(last_result_text, last_image_path)
+        elif tool == "segment_image" and isinstance(result, str):
+            last_result_text = None
+            last_image_path = params.get("image_path")
+            last_result_dict = None
+            memory.set_last_result(last_result_text, last_image_path)
 
 # ========== For UI (Gradio etc.) ==========
 def agent_respond(user_input: str):
@@ -156,24 +212,56 @@ def agent_respond(user_input: str):
 
     if not tool or tool not in function_map:
         query = user_input.lower()
-        if last_result_dict:
-            if "max width" in query:
-                return f"Max Width: {last_result_dict.get('Max Width (mm)', 'N/A')} mm", {}
-            if "area" in query:
-                return f"Area: {last_result_dict.get('Area (mm^2)', 'N/A')} mm²", {}
-            if "length" in query:
-                return f"Length: {last_result_dict.get('Length (mm)', 'N/A')} mm", {}
-            if any(k in query for k in ["advice", "repair", "fix", "how should", "what should"]):
-                summary_prompt = f"You are a crack repair expert. Based on the following result, give suggestions:\n\n{json.dumps(last_result_dict, indent=2)}"
-                completion = client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": summary_prompt}],
-                    temperature=0.5
-                )
-                reply = completion.choices[0].message.content.strip()
+
+        if "pixel_size" in params:
+            pixel_size = params["pixel_size"]
+            if last_image_path:
+                last_result_dict = measure_image(last_image_path, pixel_size)
+                last_result_text = json.dumps(last_result_dict, ensure_ascii=False, indent=2)
+                memory.set_last_result(last_result_text, last_image_path)
                 memory.add_message("user", user_input)
-                memory.add_message("assistant", reply)
-                return reply, {}
+                memory.add_message("assistant", f"Pixel size set to {pixel_size} mm/pixel")
+                return f"Pixel size set to {pixel_size} mm/pixel", {}
+            return "❌ No image segmented yet.", {}
+
+        if any(k in query for k in ["max width", "avg width", "average width", "area", "length", "compliant"]):
+            if not last_image_path:
+                return "❌ No image segmented yet.", {}
+            if last_result_dict is None:
+                last_result_dict = measure_image(last_image_path, 1.0)
+                last_result_text = json.dumps(last_result_dict, ensure_ascii=False, indent=2)
+                memory.set_last_result(last_result_text, last_image_path)
+            if "max width" in query:
+                return f"Max Width: {last_result_dict.get('Max Width (px)', 'N/A')} px", {}
+            if "avg width" in query or "average width" in query:
+                return f"Avg Width: {last_result_dict.get('Avg Width (px)', 'N/A')} px", {}
+            if "area" in query:
+                return f"Area: {last_result_dict.get('Area (px^2)', 'N/A')} px^2", {}
+            if "length" in query:
+                return f"Length: {last_result_dict.get('Length (px)', 'N/A')} px", {}
+            if "compliant" in query:
+                flags = [k for k in last_result_dict if k.endswith("OK")]
+                status = {k: last_result_dict[k] for k in flags}
+                return f"Compliance: {status}", {}
+
+        if any(k in query for k in ["advice", "repair", "fix", "how should", "what should"]):
+            if last_result_dict is None:
+                if last_image_path:
+                    last_result_dict = measure_image(last_image_path, 1.0)
+                    last_result_text = json.dumps(last_result_dict, ensure_ascii=False, indent=2)
+                    memory.set_last_result(last_result_text, last_image_path)
+                else:
+                    return "❌ No image data available.", {}
+            summary_prompt = f"You are a crack repair expert. Based on the following result, give suggestions:\n\n{json.dumps(last_result_dict, indent=2)}"
+            completion = client.chat.completions.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": summary_prompt}],
+                temperature=0.5
+            )
+            reply = completion.choices[0].message.content.strip()
+            memory.add_message("user", user_input)
+            memory.add_message("assistant", reply)
+            return reply, {}
 
         try:
             completion = client.chat.completions.create(
@@ -211,6 +299,11 @@ def agent_respond(user_input: str):
         last_image_path = params.get("image_path")
         last_result_dict = _result_to_dict(result)
         memory.set_last_result(last_result_text, last_image_path)
+    elif tool == "segment_image" and isinstance(result, str):
+        last_result_text = None
+        last_image_path = params.get("image_path")
+        last_result_dict = None
+        memory.set_last_result(last_result_text, last_image_path)
 
     image_reference = params.get("image_path", user_input)
     paths = extract_image_paths(image_reference)
@@ -242,6 +335,8 @@ def handle_user_request(user_input: str) -> str:
     memory.add_message("assistant", result)
     if tool == "analyze_one_image" and isinstance(result, str):
         memory.set_last_result(result, params.get("image_path"))
+    elif tool == "segment_image" and isinstance(result, str):
+        memory.set_last_result(None, params.get("image_path"))
     return result
 
 # ========== Main Entry ==========

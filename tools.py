@@ -6,6 +6,8 @@ import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 from agent_main import main as process_all_images, process_image
+from crack_predict_code.predict import run_prediction
+
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -33,7 +35,36 @@ analyze_all_images_spec = {
     }
 }
 
-# ========= Tool 2: analyze_one_image =========
+# ========= Tool 2: segment_image =========
+def segment_image(image_path: str) -> str:
+    if not os.path.exists(image_path):
+        return f"❌ File not found: {image_path}"
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return f"❌ Image read failed: {image_path}"
+        mask = run_prediction(img)
+        os.makedirs("output/result_images", exist_ok=True)
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        mask_path = os.path.join("output/result_images", f"{base}_mask.png")
+        cv2.imwrite(mask_path, (mask * 255).astype("uint8"))
+        return f"✅ Segmentation completed for {os.path.basename(image_path)}. Mask saved to {mask_path}"
+    except Exception as e:
+        return f"❌ Segmentation failed: {type(e).__name__} - {e}"
+
+segment_image_spec = {
+    "name": "segment_image",
+    "description": "Segment a crack image and save the mask without quantification",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "image_path": {"type": "string", "description": "Image path"}
+        },
+        "required": ["image_path"]
+    }
+}
+
+# ========= Tool 3: analyze_one_image =========
 def analyze_one_image(image_path: str, pixel_size: float = 0.1) -> str:
     if not os.path.exists(image_path):
         return f"❌ File not found: {image_path}"
@@ -57,7 +88,7 @@ analyze_one_image_spec = {
     }
 }
 
-# ========= Tool 3: summarize_results =========
+# ========= Tool 4: summarize_results =========
 def summarize_results() -> str:
     csv_path = "output/result_metrics.csv"
     if not os.path.exists(csv_path):
@@ -104,7 +135,7 @@ summarize_results_spec = {
     }
 }
 
-# ========= Tool 4: fetch_web_content =========
+# ========= Tool 5: fetch_web_content =========
 def fetch_web_content(url: str) -> str:
     """Fetch plain text content from a web page."""
     try:
@@ -145,6 +176,7 @@ def extract_image_paths(text: str) -> dict:
 # ========= Register tools for Agent usage =========
 FUNCTION_SCHEMAS = [
     analyze_all_images_spec,
+    segment_image_spec,
     analyze_one_image_spec,
     summarize_results_spec,
     fetch_web_content_spec,
@@ -152,6 +184,7 @@ FUNCTION_SCHEMAS = [
 
 FUNCTION_MAP = {
     "analyze_all_images": lambda args: analyze_all_images(**args),
+    "segment_image": lambda args: segment_image(**args),
     "analyze_one_image": lambda args: analyze_one_image(**args),
     "summarize_results": lambda args: summarize_results(),
     "fetch_web_content": lambda args: fetch_web_content(**args),

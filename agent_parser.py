@@ -26,11 +26,12 @@ Your job is to:
 
 Available tools:
 - analyze_all_images: analyze all images (accepts optional pixel_size in mm).
-- analyze_one_image: analyze a single image (requires image_path, optional pixel_size).
+- segment_image: segment one image and save the mask (requires image_path).
+- analyze_one_image: analyze a single image with quantification (requires image_path, optional pixel_size).
 - summarize_results: summarize analysis results (no parameters).
 
-Synonyms for image analysis:
-- The following user expressions should always be interpreted as analyze_one_image:
+Synonyms for segmentation:
+- The following user expressions should always be interpreted as segment_image:
     - "visualize"
     - "display"
     - "segment"
@@ -39,6 +40,9 @@ Synonyms for image analysis:
     - "visualize the segmentation result"
     - "show prediction mask"
     - "see result image"
+
+Synonyms for quantitative analysis:
+- Expressions like "analyze", "quantify", "measure", "compute" should map to analyze_one_image.
 
 Interpretations:
 - "first image" → image_index: 0
@@ -67,11 +71,18 @@ Important logic:
     "parameters": {{ "query": "repair advice" }}
   }}
 
+- If the user states the pixel size or scale, for example "pixel size is 0.2" or "scale 0.2 mm per pixel",
+  → return:
+  {{
+    "tool": "none",
+    "parameters": {{ "pixel_size": 0.2 }}
+  }}
+
 Examples:
 
 User: "visualize the first image"
 → {{
-  "tool": "analyze_one_image",
+  "tool": "segment_image",
   "parameters": {{
     "image_path": "1"
   }}
@@ -79,13 +90,21 @@ User: "visualize the first image"
 
 User: "visualize input_images/8_crack.jpg"
 → {{
-  "tool": "analyze_one_image",
+  "tool": "segment_image",
   "parameters": {{
     "image_path": "input_images/8_crack.jpg"
   }}
 }}
 
-User: "segment input_images/2_crack.jpg using 0.25mm"
+User: "segment input_images/2_crack.jpg"
+→ {{
+  "tool": "segment_image",
+  "parameters": {{
+    "image_path": "input_images/2_crack.jpg"
+  }}
+}}
+
+User: "analyze input_images/2_crack.jpg with pixel size 0.25mm"
 → {{
   "tool": "analyze_one_image",
   "parameters": {{
@@ -108,10 +127,16 @@ User: "summarize the result"
   "parameters": {{}}
 }}
 
+User: "pixel size is 0.1 mm per pixel"
+→ {{
+  "tool": "none",
+  "parameters": {{ "pixel_size": 0.1 }}
+}}
+
 Important:
 - Do NOT invent tool names.
 - Only return valid JSON. No explanation.
-- Tool names must be: analyze_one_image, analyze_all_images, summarize_results, none
+- Tool names must be: segment_image, analyze_one_image, analyze_all_images, summarize_results, none
 
 Now process the following user request and output JSON only:
 """{user_input}"""
